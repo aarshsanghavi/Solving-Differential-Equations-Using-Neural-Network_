@@ -1,28 +1,29 @@
+# ---------- DiffEq.py ----------
+
 import torch
 import torch.nn as nn
 import numpy as np
 import plotly.graph_objs as go
 
 
-# ---------- Shared: Expression Parser ----------
 def make_expr_func(expr_str):
     allowed_names = {
-        'torch': torch,
         'sin': torch.sin, 'cos': torch.cos, 'exp': torch.exp, 'log': torch.log,
         'tan': torch.tan, 'abs': torch.abs, 'sqrt': torch.sqrt,
-        'pi': torch.pi, 'e': np.e
+        'pi': torch.pi, 'e': np.e,
+        'x': None, 't': None, 'u': None,
+        'du_dx': None, 'du_dt': None, 'd2u_dx2': None, 'd2u_dt2': None
     }
     code = compile(expr_str, "<string>", "eval")
 
     def expr_func(**kwargs):
-        env = dict(allowed_names)
-        env.update(kwargs)
-        return eval(code, {"__builtins__": None}, env)
+        env = dict(allowed_names)  # use allowed names
+        env.update(kwargs)         # fill in actual torch tensors
+        return eval(code, {"__builtins__": {}}, env)
 
     return expr_func
 
 
-# ---------- ODE Solver ----------
 class NeuralNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -94,7 +95,6 @@ def solve_ode(lhs_expr, rhs_expr, x0_val, y0_val, epochs, x_min, x_max):
     return fig, loss_list, (x_plot, y_sol)
 
 
-# ---------- PDE Solver ----------
 class NeuralNetPDE(nn.Module):
     def __init__(self):
         super().__init__()
@@ -110,11 +110,10 @@ class NeuralNetPDE(nn.Module):
         return self.net(xt)
 
 
-def solve_pde(lhs_expr, rhs_expr, ic_expr, x_bounds, t_bounds, epochs=1000):
+def solve_pde(lhs_expr, rhs_expr, ic_expr, x_bounds, t_bounds, epochs=1000, aspect_ratio=None):
     device = torch.device("cpu")
     torch.manual_seed(42)
 
-    # Create grid
     x_vals = torch.linspace(x_bounds[0], x_bounds[1], 50, device=device)
     t_vals = torch.linspace(t_bounds[0], t_bounds[1], 50, device=device)
     X, T = torch.meshgrid(x_vals, t_vals, indexing='ij')
@@ -152,7 +151,6 @@ def solve_pde(lhs_expr, rhs_expr, ic_expr, x_bounds, t_bounds, epochs=1000):
         rhs_val = rhs_func(**env)
         loss_residual = loss_fn(lhs_val, rhs_val)
 
-        # ---------- Initial Condition: u(x, 0) = ic_expr ----------
         x_ic = torch.linspace(x_bounds[0], x_bounds[1], 50, device=device).unsqueeze(1)
         t_ic = torch.zeros_like(x_ic)
         xt_ic = torch.cat([x_ic, t_ic], dim=1)
@@ -160,30 +158,50 @@ def solve_pde(lhs_expr, rhs_expr, ic_expr, x_bounds, t_bounds, epochs=1000):
         u_ic_target = ic_func(x=x_ic)
         loss_ic = loss_fn(u_ic, u_ic_target)
 
-        # ---------- Boundary Condition: u(x_min,t) = u(x_max,t) = 0 ----------
         t_bc = torch.linspace(t_bounds[0], t_bounds[1], 50, device=device).unsqueeze(1)
         x0 = torch.full_like(t_bc, x_bounds[0])
         x1 = torch.full_like(t_bc, x_bounds[1])
         xt_bc0 = torch.cat([x0, t_bc], dim=1)
         xt_bc1 = torch.cat([x1, t_bc], dim=1)
+       # Neumann BCs: ∂u/∂x = 0 at boundaries
+        xt_bc0.requires_grad_(True)
+        xt_bc1.requires_grad_(True)
+
         u_bc0 = model(xt_bc0)
         u_bc1 = model(xt_bc1)
-        loss_bc = loss_fn(u_bc0, torch.zeros_like(u_bc0)) + loss_fn(u_bc1, torch.zeros_like(u_bc1))
 
-        # ---------- Total Loss ----------
+        grad_bc0 = torch.autograd.grad(u_bc0, xt_bc0, grad_outputs=torch.ones_like(u_bc0), create_graph=True)[0]
+        grad_bc1 = torch.autograd.grad(u_bc1, xt_bc1, grad_outputs=torch.ones_like(u_bc1), create_graph=True)[0]
+
+        du_dx_bc0 = grad_bc0[:, 0:1]
+        du_dx_bc1 = grad_bc1[:, 0:1]
+
+        loss_bc = loss_fn(du_dx_bc0, torch.zeros_like(du_dx_bc0)) + loss_fn(du_dx_bc1, torch.zeros_like(du_dx_bc1))
+
         loss = loss_residual + loss_ic + loss_bc
         loss.backward()
         optimizer.step()
         loss_list.append(loss.item())
 
     with torch.no_grad():
-        u_sol = model(xt).cpu().numpy().reshape(X.shape)
-        x_np, t_np = X.cpu().numpy(), T.cpu().numpy()
+        u_sol = model(xt).cpu().numpy().reshape(50, 50)
+        x_np = x_vals.cpu().numpy()
+        t_np = t_vals.cpu().numpy()
 
-    fig = go.Figure(data=[go.Surface(z=u_sol, x=x_np, y=t_np)])
+    fig = go.Figure(data=[
+        go.Surface(z=u_sol.T, x=x_np, y=t_np)
+    ])
+
     fig.update_layout(
         title="Solution Surface: u(x,t)",
-        scene=dict(xaxis_title='x', yaxis_title='t', zaxis_title='u(x,t)'),
+        scene=dict(
+            xaxis_title='x',
+            yaxis_title='t',
+            zaxis_title='u(x,t)',
+            aspectmode='manual',
+            aspectratio=aspect_ratio if aspect_ratio else dict(x=1, y=1, z=0.7)
+        ),
         template='plotly_white'
     )
-    return fig, loss_list
+
+    return fig, loss_list, u_sol, x_np, t_np
