@@ -61,6 +61,7 @@ if mode == "ODE Solver":
         st.subheader("Initial Conditions")
         x0 = st.number_input("Initial x₀", value=0.0)
         y0 = st.number_input("Initial y₀", value=0.0)
+        
 
         st.subheader("Domain & Training")
         x_min = st.number_input("x_min", value=-2.0)
@@ -119,6 +120,11 @@ elif mode == "PDE Solver":
         st.subheader("Initial Condition")
         ic_expr = st.text_input("Initial Condition (u(x,0))", value="sin(pi * x)")
 
+        st.subheader("Boundary Conditions")
+        bc_type = st.selectbox("Select Boundary Condition Type", ["Dirichlet", "Neumann"])
+        bc_expr = st.text_input("Boundary Expression (in x and t)", value="0")
+
+
         st.subheader("Domain & Training")
         x_min = st.number_input("x_min", value=0.0)
         x_max = st.number_input("x_max", value=1.0)
@@ -132,12 +138,15 @@ elif mode == "PDE Solver":
         if run_pde:
             try:
                 fig, loss_list, u_arr, x_vals, t_vals = solve_pde(
-                    lhs_expr, rhs_expr, ic_expr,
-                    x_bounds=(x_min, x_max),
-                    t_bounds=(t_min, t_max),
-                    epochs=epochs,
-                    aspect_ratio=None
-                )
+                lhs_expr, rhs_expr, ic_expr,
+                x_bounds=(x_min, x_max),
+                t_bounds=(t_min, t_max),
+                bc_type=bc_type.lower(),     # 'dirichlet' or 'neumann'
+                bc_expr=bc_expr,
+                epochs=epochs,
+                aspect_ratio=None
+            )
+
 
                 # Save to session
                 st.session_state.pde_solution = {

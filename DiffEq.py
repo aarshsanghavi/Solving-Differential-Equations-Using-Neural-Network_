@@ -110,7 +110,8 @@ class NeuralNetPDE(nn.Module):
         return self.net(xt)
 
 
-def solve_pde(lhs_expr, rhs_expr, ic_expr, x_bounds, t_bounds, epochs=1000, aspect_ratio=None):
+def solve_pde(lhs_expr, rhs_expr, ic_expr, x_bounds, t_bounds,
+              bc_type='neumann', bc_expr="0", epochs=1000, aspect_ratio=None):
     device = torch.device("cpu")
     torch.manual_seed(42)
 
@@ -126,6 +127,7 @@ def solve_pde(lhs_expr, rhs_expr, ic_expr, x_bounds, t_bounds, epochs=1000, aspe
     lhs_func = make_expr_func(lhs_expr)
     rhs_func = make_expr_func(rhs_expr)
     ic_func = make_expr_func(ic_expr)
+    bc_func = make_expr_func(bc_expr)
 
     loss_list = []
 
@@ -151,32 +153,56 @@ def solve_pde(lhs_expr, rhs_expr, ic_expr, x_bounds, t_bounds, epochs=1000, aspe
         rhs_val = rhs_func(**env)
         loss_residual = loss_fn(lhs_val, rhs_val)
 
+        # Initial condition: u(x, 0) = ic_expr
         x_ic = torch.linspace(x_bounds[0], x_bounds[1], 50, device=device).unsqueeze(1)
         t_ic = torch.zeros_like(x_ic)
         xt_ic = torch.cat([x_ic, t_ic], dim=1)
         u_ic = model(xt_ic)
         u_ic_target = ic_func(x=x_ic)
+        if isinstance(u_ic_target, (int, float)):
+            u_ic_target = torch.full_like(u_ic, float(u_ic_target))
         loss_ic = loss_fn(u_ic, u_ic_target)
 
+        # Boundary conditions at x = x_min and x = x_max
         t_bc = torch.linspace(t_bounds[0], t_bounds[1], 50, device=device).unsqueeze(1)
         x0 = torch.full_like(t_bc, x_bounds[0])
         x1 = torch.full_like(t_bc, x_bounds[1])
-        xt_bc0 = torch.cat([x0, t_bc], dim=1)
-        xt_bc1 = torch.cat([x1, t_bc], dim=1)
-       # Neumann BCs: ∂u/∂x = 0 at boundaries
-        xt_bc0.requires_grad_(True)
-        xt_bc1.requires_grad_(True)
+        xt_bc0 = torch.cat([x0, t_bc], dim=1).requires_grad_()
+        xt_bc1 = torch.cat([x1, t_bc], dim=1).requires_grad_()
 
         u_bc0 = model(xt_bc0)
         u_bc1 = model(xt_bc1)
 
-        grad_bc0 = torch.autograd.grad(u_bc0, xt_bc0, grad_outputs=torch.ones_like(u_bc0), create_graph=True)[0]
-        grad_bc1 = torch.autograd.grad(u_bc1, xt_bc1, grad_outputs=torch.ones_like(u_bc1), create_graph=True)[0]
+        if bc_type.lower() == "neumann":
+            grad_bc0 = torch.autograd.grad(u_bc0, xt_bc0, grad_outputs=torch.ones_like(u_bc0), create_graph=True)[0]
+            grad_bc1 = torch.autograd.grad(u_bc1, xt_bc1, grad_outputs=torch.ones_like(u_bc1), create_graph=True)[0]
 
-        du_dx_bc0 = grad_bc0[:, 0:1]
-        du_dx_bc1 = grad_bc1[:, 0:1]
+            du_dx_bc0 = grad_bc0[:, 0:1]
+            du_dx_bc1 = grad_bc1[:, 0:1]
 
-        loss_bc = loss_fn(du_dx_bc0, torch.zeros_like(du_dx_bc0)) + loss_fn(du_dx_bc1, torch.zeros_like(du_dx_bc1))
+            target_flux0 = bc_func(x=x0, t=t_bc)
+            target_flux1 = bc_func(x=x1, t=t_bc)
+
+            if isinstance(target_flux0, (int, float)):
+                target_flux0 = torch.full_like(du_dx_bc0, float(target_flux0))
+            if isinstance(target_flux1, (int, float)):
+                target_flux1 = torch.full_like(du_dx_bc1, float(target_flux1))
+
+            loss_bc = loss_fn(du_dx_bc0, target_flux0) + loss_fn(du_dx_bc1, target_flux1)
+
+        elif bc_type.lower() == "dirichlet":
+            target_val0 = bc_func(x=x0, t=t_bc)
+            target_val1 = bc_func(x=x1, t=t_bc)
+
+            if isinstance(target_val0, (int, float)):
+                target_val0 = torch.full_like(u_bc0, float(target_val0))
+            if isinstance(target_val1, (int, float)):
+                target_val1 = torch.full_like(u_bc1, float(target_val1))
+
+            loss_bc = loss_fn(u_bc0, target_val0) + loss_fn(u_bc1, target_val1)
+
+        else:
+            raise ValueError(f"Unsupported boundary type: {bc_type}")
 
         loss = loss_residual + loss_ic + loss_bc
         loss.backward()
